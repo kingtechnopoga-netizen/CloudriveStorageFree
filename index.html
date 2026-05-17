@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#070b1a" />
+    <meta name="description" content="CloudVault — Upload your images and videos to your private Puter cloud storage. Real cloud uploads powered by Puter.js v2." />
+    <meta name="color-scheme" content="dark" />
+    <title>CloudVault — Real cloud upload powered by Puter.js</title>
+
+    <!-- Puter.js v2 CDN (required) -->
+    <script src="https://js.puter.com/v2/"></script>
+
+    <!-- Stylesheet -->
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Decorative floating glow blobs -->
+      <div class="bg-blobs" aria-hidden="true">
+        <span class="blob blob-cyan"></span>
+        <span class="blob blob-violet"></span>
+        <span class="blob blob-blue"></span>
+      </div>
+
+      <!-- Header -->
+      <header class="site-header">
+        <div class="brand">
+          <div class="logo" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M7 18a5 5 0 1 1 1.2-9.86A6 6 0 0 1 19.5 11.5 4 4 0 0 1 19 19.5H7" stroke="url(#g1)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M12 12.5v5m0-5l-2 2m2-2l2 2" stroke="url(#g1)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              <defs>
+                <linearGradient id="g1" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+                  <stop stop-color="#22d3ee"/>
+                  <stop offset="1" stop-color="#a78bfa"/>
+                </linearGradient>
+              </defs>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <h1 class="brand-title">CloudVault</h1>
+            <p class="brand-tagline">Real cloud upload powered by Puter.js</p>
+          </div>
+        </div>
+        <div class="auth-area">
+          <span id="auth-status" class="auth-pill">Connecting…</span>
+          <button id="sign-in-btn" class="btn btn-ghost" type="button" hidden>Sign in</button>
+        </div>
+      </header>
+
+      <!-- Hero -->
+      <section class="hero">
+        <h2 class="hero-title">Upload your images and videos</h2>
+        <p class="hero-subtitle">
+          Save your media files to your private Puter cloud storage and access them anytime.
+        </p>
+      </section>
+
+      <!-- Upload card -->
+      <section class="card upload-card" aria-labelledby="upload-heading">
+        <h3 id="upload-heading" class="card-title">Upload media</h3>
+
+        <label for="file-input" class="dropzone" id="dropzone">
+          <div class="dropzone-inner">
+            <div class="dropzone-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 16V4m0 0l-4 4m4-4l4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
+            <div class="dropzone-text">
+              <strong>Tap to choose files</strong>
+              <span>or drag &amp; drop images / videos here</span>
+            </div>
+            <div class="dropzone-types">JPEG · PNG · WEBP · GIF · MP4 · WEBM · OGG</div>
+          </div>
+          <input
+            id="file-input"
+            type="file"
+            multiple
+            accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/ogg"
+            hidden
+          />
+        </label>
+
+        <div id="selected-list" class="selected-list" aria-live="polite"></div>
+
+        <div class="upload-actions">
+          <button id="upload-btn" class="btn btn-primary" type="button" disabled>
+            <span class="btn-label">Upload</span>
+            <span class="btn-spinner" aria-hidden="true"></span>
+          </button>
+          <button id="clear-btn" class="btn btn-ghost" type="button" disabled>Clear selection</button>
+        </div>
+
+        <div id="status" class="status" role="status" aria-live="polite">Ready</div>
+      </section>
+
+      <!-- Stats -->
+      <section class="stats" aria-label="Library stats">
+        <div class="stat-card">
+          <div class="stat-label">Total files</div>
+          <div class="stat-value" id="stat-total">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Images</div>
+          <div class="stat-value" id="stat-images">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Videos</div>
+          <div class="stat-value" id="stat-videos">0</div>
+        </div>
+      </section>
+
+      <!-- Gallery -->
+      <section class="gallery-section" aria-labelledby="gallery-heading">
+        <div class="gallery-header">
+          <h3 id="gallery-heading" class="card-title">Your library</h3>
+          <button id="refresh-btn" class="btn btn-ghost btn-small" type="button">Refresh</button>
+        </div>
+
+        <div id="gallery" class="gallery" aria-live="polite"></div>
+
+        <div id="gallery-empty" class="empty-state" hidden>
+          <div class="empty-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="9" cy="11" r="1.6" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M5 18l4.5-4.5a2 2 0 0 1 2.8 0L21 22" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <h4>Your vault is empty</h4>
+          <p>Upload your first image or video to get started.</p>
+        </div>
+
+        <div id="gallery-loading" class="loading" hidden>
+          <span class="spinner" aria-hidden="true"></span>
+          <span>Loading your library…</span>
+        </div>
+      </section>
+
+      <!-- Footer -->
+      <footer class="site-footer">
+        <p>Built with <a href="https://puter.com" target="_blank" rel="noopener noreferrer">Puter.js</a></p>
+      </footer>
+    </div>
+
+    <!-- App entry -->
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
