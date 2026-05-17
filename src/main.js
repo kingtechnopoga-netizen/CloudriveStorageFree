@@ -189,9 +189,63 @@ function revokeAllObjectUrls() {
   state.objectUrls.clear();
 }
 
+/**
+ * Convert any value returned from puter.fs.read into a typed Blob.
+ * Puter.js may return a Blob, a Response, a ReadableStream, an ArrayBuffer,
+ * a Uint8Array, or a string depending on version and content type.
+ */
+async function normalizeToBlob(value, mime) {
+  const type = mime || 'application/octet-stream';
+  if (!value) throw new Error('Empty response');
+
+  if (value instanceof Blob) {
+    return value.type ? value : new Blob([value], { type });
+  }
+  if (typeof Response !== 'undefined' && value instanceof Response) {
+    const b = await value.blob();
+    return b.type ? b : new Blob([b], { type });
+  }
+  if (value instanceof ArrayBuffer) {
+    return new Blob([value], { type });
+  }
+  if (ArrayBuffer.isView(value)) {
+    return new Blob([value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength)], { type });
+  }
+  if (value && typeof value.arrayBuffer === 'function') {
+    const buf = await value.arrayBuffer();
+    return new Blob([buf], { type });
+  }
+  if (typeof ReadableStream !== 'undefined' && value instanceof ReadableStream) {
+    const reader = value.getReader();
+    const chunks = [];
+    /* eslint-disable no-await-in-loop */
+    while (true) {
+      const { value: chunk, done } = await reader.read();
+      if (done) break;
+      if (chunk) chunks.push(chunk);
+    }
+    /* eslint-enable no-await-in-loop */
+    return new Blob(chunks, { type });
+  }
+  if (typeof value === 'string') {
+    return new Blob([value], { type });
+  }
+  // Last resort: stringify (won't render media but won't crash)
+  return new Blob([String(value)], { type });
+}
+
 // ===========================================================
 // Auth helpers
 // ===========================================================
+
+async function isSignedInSafe() {
+  try {
+    if (window.puter?.auth?.isSignedIn) {
+      return await Promise.resolve(window.puter.auth.isSignedIn());
+    }
+  } catch (_) { /* ignore */ }
+  return false;
+}
 
 async function refreshAuthBadge() {
   const badge = els.authStatus;
@@ -199,7 +253,7 @@ async function refreshAuthBadge() {
   if (!badge) return;
 
   try {
-    const signedIn = await Promise.resolve(window.puter?.auth?.isSignedIn?.());
+    const signedIn = await isSignedInSafe();
     if (signedIn) {
       badge.textContent = 'Signed in';
       badge.dataset.state = 'signed-in';
@@ -218,13 +272,19 @@ async function refreshAuthBadge() {
 
 async function ensureSignedIn() {
   try {
-    const isIn = await Promise.resolve(window.puter?.auth?.isSignedIn?.());
-    if (isIn) return true;
-    // Trigger Puter sign-in popup
-    await window.puter.auth.signIn();
+    if (await isSignedInSafe()) return true;
+    // Puter.js v2 exposes auth.signIn() which opens a popup.
+    if (window.puter?.auth?.signIn) {
+      await window.puter.auth.signIn();
+    }
+    const ok = await isSignedInSafe();
     await refreshAuthBadge();
-    return true;
+    if (!ok) {
+      setStatus('Please sign in to Puter to upload and manage your files.', 'warning');
+    }
+    return ok;
   } catch (err) {
+    console.error('signIn failed:', err);
     setStatus('Please sign in to Puter to upload and manage your files.', 'warning');
     return false;
   }
@@ -334,8 +394,131 @@ function clearSelection() {
 }
 
 // ===========================================================
-// Upload
+// Upload (robust, multi-strategy)
 // ===========================================================
+
+/**
+ * Try to ensure the storage folder exists. If mkdir is unavailable or
+ * the folder already exists, silently continue. Failures here are
+ * non-fatal because both fs.write({createMissingParents:true}) and
+ * fs.upload() will create the folder themselves on most builds.
+ */
+async function ensureStorageFolder() {
+  try {
+    if (window.puter?.fs?.mkdir) {
+      await window.puter.fs.mkdir(STORAGE_FOLDER, {
+        createMissingParents: true,
+        overwrite: false,
+        dedupeName: false
+      });
+    }
+  } catch (_) { /* folder probably already exists — that's fine */ }
+}
+
+/**
+ * Upload a single browser File using whichever Puter.js API works.
+ *
+ * Strategy order (each is wrapped in try/catch):
+ *   1. puter.fs.upload([file], parentDir)           ← preferred for File objects
+ *   2. puter.fs.write(fullPath, file, {createMissingParents:true, overwrite:false})
+ *   3. puter.fs.write(fullPath, blob, {createMissingParents:true, overwrite:false})
+ *      (rebuild the file as a Blob with explicit MIME)
+ *   4. puter.fs.write(fullPath, arrayBuffer, {createMissingParents:true, overwrite:false})
+ *
+ * Returns the resulting remote path (best effort) or throws the last error.
+ */
+async function uploadOneFile(file, remoteName) {
+  const remotePath = `${STORAGE_FOLDER}/${remoteName}`;
+  const errors = [];
+
+  // ---------- Strategy 1: puter.fs.upload ----------
+  // puter.fs.upload(items, dirPath, options) is the documented API for
+  // browser File / FileList uploads. We rename the File so Puter saves it
+  // under our unique name (avoids conflicts) and keep it inside our folder.
+  try {
+    if (window.puter?.fs?.upload) {
+      // Re-wrap File with the unique name so the saved filename is unique.
+      let renamed;
+      try {
+        renamed = new File([file], remoteName, {
+          type: file.type || mimeFromName(file.name) || 'application/octet-stream',
+          lastModified: file.lastModified || Date.now()
+        });
+      } catch (_) {
+        // Some very old browsers don't allow `new File(...)` — fall back to original.
+        renamed = file;
+      }
+
+      const result = await window.puter.fs.upload([renamed], STORAGE_FOLDER, {
+        createMissingParents: true,
+        overwrite: false,
+        dedupeName: true
+      });
+
+      // Best-effort: return the path Puter reports (varies by build).
+      const first = Array.isArray(result) ? result[0] : result;
+      if (first && (first.path || first.name)) {
+        return first.path || `${STORAGE_FOLDER}/${first.name}`;
+      }
+      return remotePath;
+    }
+  } catch (err) {
+    errors.push(['upload', err]);
+    console.warn('puter.fs.upload failed, falling back:', err);
+  }
+
+  // ---------- Strategy 2: puter.fs.write(path, file) ----------
+  try {
+    if (window.puter?.fs?.write) {
+      await window.puter.fs.write(remotePath, file, {
+        createMissingParents: true,
+        overwrite: false,
+        dedupeName: true
+      });
+      return remotePath;
+    }
+  } catch (err) {
+    errors.push(['write-file', err]);
+    console.warn('puter.fs.write(file) failed, falling back:', err);
+  }
+
+  // ---------- Strategy 3: puter.fs.write(path, blob) ----------
+  try {
+    if (window.puter?.fs?.write) {
+      const mime = file.type || mimeFromName(file.name) || 'application/octet-stream';
+      const blob = new Blob([file], { type: mime });
+      await window.puter.fs.write(remotePath, blob, {
+        createMissingParents: true,
+        overwrite: false,
+        dedupeName: true
+      });
+      return remotePath;
+    }
+  } catch (err) {
+    errors.push(['write-blob', err]);
+    console.warn('puter.fs.write(blob) failed, falling back:', err);
+  }
+
+  // ---------- Strategy 4: puter.fs.write(path, arrayBuffer) ----------
+  try {
+    if (window.puter?.fs?.write && typeof file.arrayBuffer === 'function') {
+      const buf = await file.arrayBuffer();
+      await window.puter.fs.write(remotePath, buf, {
+        createMissingParents: true,
+        overwrite: false,
+        dedupeName: true
+      });
+      return remotePath;
+    }
+  } catch (err) {
+    errors.push(['write-buffer', err]);
+    console.warn('puter.fs.write(arrayBuffer) failed, falling back:', err);
+  }
+
+  // All strategies failed — throw the last (most informative) error.
+  const last = errors[errors.length - 1]?.[1];
+  throw last || new Error('Upload failed: no compatible Puter.js API found.');
+}
 
 async function uploadAll() {
   if (state.isUploading) return;
@@ -344,10 +527,21 @@ async function uploadAll() {
     return;
   }
 
+  // Make sure Puter.js is actually loaded (CDN can be flaky on slow networks).
+  try {
+    await waitForPuter();
+  } catch (err) {
+    setStatus(readableError(err), 'error');
+    return;
+  }
+
   // Ensure signed in (so Puter can write to user storage)
   setStatus('Checking files', 'working');
   const ok = await ensureSignedIn();
   if (!ok) return;
+
+  // Best-effort: pre-create folder.
+  await ensureStorageFolder();
 
   state.isUploading = true;
   els.uploadBtn.classList.add('is-loading');
@@ -357,7 +551,7 @@ async function uploadAll() {
 
   const total = state.selected.length;
   let succeeded = 0;
-  let failedNames = [];
+  const failed = []; // [{ file, error }]
 
   for (let i = 0; i < total; i++) {
     const file = state.selected[i];
@@ -365,20 +559,15 @@ async function uploadAll() {
 
     try {
       const remoteName = buildUniqueName(file.name);
-      const remotePath = `${STORAGE_FOLDER}/${remoteName}`;
-
-      // Real upload to Puter cloud storage
-      await window.puter.fs.write(remotePath, file, {
-        createMissingParents: true,
-        overwrite: false
-      });
-
+      await uploadOneFile(file, remoteName);
       succeeded++;
     } catch (err) {
       console.error('Upload failed for', file.name, err);
-      failedNames.push(file.name);
+      failed.push({ file, error: err });
+
       if (isAuthError(err)) {
         setStatus('Please sign in to Puter to upload and manage your files.', 'warning');
+        await refreshAuthBadge();
         break;
       }
     }
@@ -388,21 +577,27 @@ async function uploadAll() {
   els.uploadBtn.classList.remove('is-loading');
   els.fileInput.disabled = false;
 
-  if (failedNames.length === 0 && succeeded > 0) {
-    setStatus(`Upload complete — ${succeeded} file${succeeded === 1 ? '' : 's'} saved to cloud.`, 'success');
+  if (failed.length === 0 && succeeded > 0) {
+    setStatus(
+      `Upload complete — ${succeeded} file${succeeded === 1 ? '' : 's'} saved to cloud.`,
+      'success'
+    );
     state.selected = [];
     els.fileInput.value = '';
     renderSelectedList();
-  } else if (succeeded > 0 && failedNames.length > 0) {
+  } else if (succeeded > 0 && failed.length > 0) {
+    const reason = readableError(failed[0].error);
     setStatus(
-      `Uploaded ${succeeded} of ${total}. Upload failed: ${failedNames.join(', ')}`,
+      `Uploaded ${succeeded} of ${total}. Upload failed: ${reason}`,
       'warning'
     );
-    // Drop succeeded ones, keep failed for retry
-    state.selected = state.selected.filter((f) => failedNames.includes(f.name));
+    // Keep only the failed files for retry
+    const failedNames = new Set(failed.map((f) => f.file.name));
+    state.selected = state.selected.filter((f) => failedNames.has(f.name));
     renderSelectedList();
   } else {
-    setStatus(`Upload failed: ${failedNames.length ? failedNames.join(', ') : 'no files were uploaded.'}`, 'error');
+    const reason = failed[0] ? readableError(failed[0].error) : 'no files were uploaded.';
+    setStatus(`Upload failed: ${reason}`, 'error');
     renderSelectedList();
   }
 
@@ -605,17 +800,11 @@ async function hydrateCardMedia(entry) {
   const mime = mimeFromName(entry.name) || (kind === 'image' ? 'image/*' : kind === 'video' ? 'video/*' : 'application/octet-stream');
 
   try {
-    // Real cloud read — returns a Blob
-    const blob = await window.puter.fs.read(path);
-    let usable;
-    if (blob instanceof Blob) {
-      usable = mime && blob.type !== mime ? new Blob([blob], { type: mime }) : blob;
-    } else if (blob && typeof blob.arrayBuffer === 'function') {
-      const buf = await blob.arrayBuffer();
-      usable = new Blob([buf], { type: mime });
-    } else {
-      throw new Error('Unsupported file payload');
-    }
+    // Real cloud read — may return Blob, Response, ReadableStream or ArrayBuffer
+    // depending on the Puter.js build. Normalise to a typed Blob.
+    const raw = await window.puter.fs.read(path);
+    const usable = await normalizeToBlob(raw, mime);
+    if (!(usable instanceof Blob)) throw new Error('Unsupported file payload');
 
     const url = URL.createObjectURL(usable);
     state.objectUrls.add(url);
