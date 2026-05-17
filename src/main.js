@@ -47,6 +47,7 @@ const els = {
 const state = {
   selected: [],            // File[]
   objectUrls: new Set(),   // track URLs to revoke
+  cardBlobs: new Map(),    // path -> Blob (for instant Download)
   isUploading: false,
   isLoadingGallery: false
 };
@@ -114,6 +115,35 @@ function buildUniqueName(originalName) {
   const ts = Date.now();
   const rand = Math.random().toString(36).slice(2, 8);
   return `${ts}-${rand}-${sanitizeBaseName(originalName)}`;
+}
+
+/**
+ * Reverse of buildUniqueName(): strip the `<timestamp>-<rand>-` prefix
+ * so the downloaded file uses the original name when possible.
+ * If the prefix isn't found, return the name unchanged.
+ */
+function friendlyFilename(name) {
+  if (!name) return 'download';
+  // Match: 13+ digit timestamp, dash, 4-12 char alphanumeric token, dash, rest
+  const m = /^(\d{10,})-([A-Za-z0-9]{4,12})-(.+)$/.exec(name);
+  return m && m[3] ? m[3] : name;
+}
+
+/** Trigger a browser download for a Blob. */
+function downloadBlob(blob, filename) {
+  if (!(blob instanceof Blob)) return;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename || 'download';
+  // Append to body for Firefox compatibility
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Revoke after a tick so the download has a chance to start
+  setTimeout(() => {
+    try { URL.revokeObjectURL(url); } catch (_) { /* noop */ }
+  }, 1500);
 }
 
 /** Set status message and visual state. */
@@ -622,6 +652,7 @@ function showEmpty(show) {
 function clearGalleryDom() {
   els.gallery.textContent = '';
   revokeAllObjectUrls();
+  state.cardBlobs.clear();
 }
 
 function updateStats(entries) {
@@ -758,7 +789,8 @@ function buildGalleryCard(entry) {
 
   const nm = document.createElement('div');
   nm.className = 'gc-name';
-  nm.textContent = entry.name;
+  nm.textContent = friendlyFilename(entry.name);
+  nm.title = entry.name;
   info.appendChild(nm);
 
   const meta = document.createElement('div');
@@ -775,6 +807,13 @@ function buildGalleryCard(entry) {
 
   const actions = document.createElement('div');
   actions.className = 'gc-actions';
+
+  const dlBtn = document.createElement('button');
+  dlBtn.type = 'button';
+  dlBtn.className = 'btn btn-primary';
+  dlBtn.textContent = 'Download';
+  dlBtn.addEventListener('click', () => handleDownload(entry, card));
+  actions.appendChild(dlBtn);
 
   const delBtn = document.createElement('button');
   delBtn.type = 'button';
@@ -805,6 +844,9 @@ async function hydrateCardMedia(entry) {
     const raw = await window.puter.fs.read(path);
     const usable = await normalizeToBlob(raw, mime);
     if (!(usable instanceof Blob)) throw new Error('Unsupported file payload');
+
+    // Cache for instant Download.
+    state.cardBlobs.set(path, usable);
 
     const url = URL.createObjectURL(usable);
     state.objectUrls.add(url);
@@ -847,6 +889,57 @@ async function hydrateCardMedia(entry) {
 function cssEscape(value) {
   if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
   return String(value).replace(/[^a-zA-Z0-9_\u00A0-\uFFFF-]/g, (ch) => `\\${ch}`);
+}
+
+// ===========================================================
+// Download
+// ===========================================================
+
+async function handleDownload(entry, card) {
+  const path = entry.path || `${STORAGE_FOLDER}/${entry.name}`;
+  const friendly = friendlyFilename(entry.name);
+  const mime = mimeFromName(entry.name) || 'application/octet-stream';
+
+  // Fast path: the gallery already loaded this blob for the preview.
+  const cached = state.cardBlobs.get(path);
+  if (cached instanceof Blob) {
+    try {
+      downloadBlob(cached, friendly);
+      setStatus(`Downloaded ${friendly}.`, 'success');
+      return;
+    } catch (err) {
+      console.warn('Cached download failed, will re-fetch:', err);
+    }
+  }
+
+  // Slow path: fetch from Puter and download.
+  const dlBtn = card?.querySelector('.gc-actions .btn-primary');
+  if (dlBtn) {
+    dlBtn.classList.add('is-loading');
+    dlBtn.disabled = true;
+  }
+  setStatus(`Preparing download for ${friendly}…`, 'working');
+
+  try {
+    const raw = await window.puter.fs.read(path);
+    const blob = await normalizeToBlob(raw, mime);
+    if (!(blob instanceof Blob)) throw new Error('Unsupported file payload');
+    state.cardBlobs.set(path, blob);
+    downloadBlob(blob, friendly);
+    setStatus(`Downloaded ${friendly}.`, 'success');
+  } catch (err) {
+    console.error('Download failed:', err);
+    if (isAuthError(err)) {
+      setStatus('Please sign in to Puter to upload and manage your files.', 'warning');
+    } else {
+      setStatus(`Download failed: ${readableError(err)}`, 'error');
+    }
+  } finally {
+    if (dlBtn) {
+      dlBtn.classList.remove('is-loading');
+      dlBtn.disabled = false;
+    }
+  }
 }
 
 // ===========================================================
