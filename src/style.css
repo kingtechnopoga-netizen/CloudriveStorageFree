@@ -702,6 +702,112 @@ p {
   justify-content: space-between;
   gap: 8px;
   padding: 0 4px;
+  flex-wrap: wrap;
+}
+
+.gallery-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- Breadcrumbs ---------- */
+.breadcrumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--glass-bg-2);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  min-height: 38px;
+}
+
+.breadcrumbs:empty {
+  display: none;
+}
+
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+  -webkit-tap-highlight-color: transparent;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crumb:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.crumb:active {
+  transform: scale(0.97);
+}
+
+.crumb.is-current {
+  background: var(--grad-soft);
+  border-color: var(--glass-border-strong);
+  color: var(--text);
+  cursor: default;
+}
+
+.crumb svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.crumb-sep {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  user-select: none;
+}
+
+/* ---------- Folder cards (variant of gallery-card) ---------- */
+.gallery-card.folder-card {
+  cursor: pointer;
+}
+
+.gallery-card.folder-card .gc-media {
+  aspect-ratio: 16 / 9;
+  background:
+    radial-gradient(circle at 30% 20%, rgba(34, 211, 238, 0.18), transparent 60%),
+    radial-gradient(circle at 80% 80%, rgba(167, 139, 250, 0.18), transparent 60%),
+    rgba(10, 16, 40, 0.65);
+}
+
+.folder-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 18px;
+  display: grid;
+  place-items: center;
+  background: var(--grad-soft);
+  border: 1px solid var(--glass-border-strong);
+  color: #c7d2fe;
+  box-shadow: var(--shadow-glow-violet);
+}
+
+.folder-icon svg {
+  width: 32px;
+  height: 32px;
 }
 
 .gallery {

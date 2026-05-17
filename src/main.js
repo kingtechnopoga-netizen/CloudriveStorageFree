@@ -39,6 +39,8 @@ const els = {
   galleryEmpty: $('gallery-empty'),
   galleryLoading: $('gallery-loading'),
   refreshBtn: $('refresh-btn'),
+  newFolderBtn: $('new-folder-btn'),
+  breadcrumbs: $('breadcrumbs'),
   authStatus: $('auth-status'),
   signInBtn: $('sign-in-btn')
 };
@@ -49,8 +51,16 @@ const state = {
   objectUrls: new Set(),   // track URLs to revoke
   cardBlobs: new Map(),    // path -> Blob (for instant Download)
   isUploading: false,
-  isLoadingGallery: false
+  isLoadingGallery: false,
+  // Folder navigation: empty array = root (== STORAGE_FOLDER itself).
+  // Each entry is a single folder name (already sanitized).
+  currentPath: []
 };
+
+/** Build the absolute Puter path for the current folder. */
+function currentFolderPath() {
+  return [STORAGE_FOLDER, ...state.currentPath].join('/');
+}
 
 // ===========================================================
 // Utilities
@@ -436,7 +446,10 @@ function clearSelection() {
 async function ensureStorageFolder() {
   try {
     if (window.puter?.fs?.mkdir) {
-      await window.puter.fs.mkdir(STORAGE_FOLDER, {
+      // Always make sure the root storage folder exists, plus the
+      // current sub-folder (if any). createMissingParents handles depth.
+      const target = currentFolderPath();
+      await window.puter.fs.mkdir(target, {
         createMissingParents: true,
         overwrite: false,
         dedupeName: false
@@ -458,7 +471,8 @@ async function ensureStorageFolder() {
  * Returns the resulting remote path (best effort) or throws the last error.
  */
 async function uploadOneFile(file, remoteName) {
-  const remotePath = `${STORAGE_FOLDER}/${remoteName}`;
+  const parentDir = currentFolderPath();
+  const remotePath = `${parentDir}/${remoteName}`;
   const errors = [];
 
   // ---------- Strategy 1: puter.fs.upload ----------
@@ -479,7 +493,7 @@ async function uploadOneFile(file, remoteName) {
         renamed = file;
       }
 
-      const result = await window.puter.fs.upload([renamed], STORAGE_FOLDER, {
+      const result = await window.puter.fs.upload([renamed], parentDir, {
         createMissingParents: true,
         overwrite: false,
         dedupeName: true
@@ -488,7 +502,7 @@ async function uploadOneFile(file, remoteName) {
       // Best-effort: return the path Puter reports (varies by build).
       const first = Array.isArray(result) ? result[0] : result;
       if (first && (first.path || first.name)) {
-        return first.path || `${STORAGE_FOLDER}/${first.name}`;
+        return first.path || `${parentDir}/${first.name}`;
       }
       return remotePath;
     }
@@ -675,6 +689,7 @@ async function loadGallery() {
   clearGalleryDom();
   showEmpty(false);
   showLoading(true);
+  renderBreadcrumbs();
 
   try {
     await waitForPuter();
@@ -685,9 +700,10 @@ async function loadGallery() {
     return;
   }
 
+  const folderPath = currentFolderPath();
   let entries = [];
   try {
-    const result = await window.puter.fs.readdir(STORAGE_FOLDER);
+    const result = await window.puter.fs.readdir(folderPath);
     entries = Array.isArray(result) ? result : [];
   } catch (err) {
     showLoading(false);
@@ -713,7 +729,12 @@ async function loadGallery() {
     return;
   }
 
-  // Filter only files (skip dirs) and only supported media
+  // Split entries into folders and supported media files.
+  const folderEntries = entries.filter((e) => {
+    if (!e || !e.name) return false;
+    return e.is_dir === true || e.isDirectory === true;
+  });
+
   const fileEntries = entries.filter((e) => {
     if (!e || !e.name) return false;
     if (e.is_dir || e.isDirectory) return false;
@@ -721,7 +742,8 @@ async function loadGallery() {
     return kind === 'image' || kind === 'video';
   });
 
-  // Newest first (filename starts with timestamp; fall back to modified time)
+  // Folders alphabetically; files newest-first using timestamp prefix
+  folderEntries.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   fileEntries.sort((a, b) => {
     const ta = parseInt((a.name || '').split('-')[0], 10);
     const tb = parseInt((b.name || '').split('-')[0], 10);
@@ -734,18 +756,21 @@ async function loadGallery() {
   updateStats(fileEntries);
   showLoading(false);
 
-  if (fileEntries.length === 0) {
+  if (folderEntries.length === 0 && fileEntries.length === 0) {
     showEmpty(true);
     state.isLoadingGallery = false;
     return;
   }
 
-  // Build cards (skeletons first), then load each blob in parallel
+  // Render folders first, then media files.
+  for (const entry of folderEntries) {
+    els.gallery.appendChild(buildFolderCard(entry));
+  }
   for (const entry of fileEntries) {
-    const card = buildGalleryCard(entry);
-    els.gallery.appendChild(card);
+    els.gallery.appendChild(buildGalleryCard(entry));
   }
 
+  // Hydrate media previews in parallel; folder cards don't need hydration.
   await Promise.all(
     fileEntries.map((entry) => hydrateCardMedia(entry))
   );
@@ -754,7 +779,7 @@ async function loadGallery() {
 }
 
 function buildGalleryCard(entry) {
-  const path = entry.path || `${STORAGE_FOLDER}/${entry.name}`;
+  const path = entry.path || `${currentFolderPath()}/${entry.name}`;
   const kind = detectKind(mimeFromName(entry.name), entry.name);
   const mime = mimeFromName(entry.name) || (kind === 'image' ? 'image/*' : kind === 'video' ? 'video/*' : 'application/octet-stream');
 
@@ -828,7 +853,7 @@ function buildGalleryCard(entry) {
 }
 
 async function hydrateCardMedia(entry) {
-  const path = entry.path || `${STORAGE_FOLDER}/${entry.name}`;
+  const path = entry.path || `${currentFolderPath()}/${entry.name}`;
   const card = els.gallery.querySelector(`.gallery-card[data-path="${cssEscape(path)}"]`);
   if (!card) return;
 
@@ -892,11 +917,264 @@ function cssEscape(value) {
 }
 
 // ===========================================================
+// Folders
+// ===========================================================
+
+/** Sanitize a user-provided folder name. */
+function sanitizeFolderName(raw) {
+  if (!raw) return '';
+  // Trim, collapse whitespace, strip path separators and risky chars,
+  // limit length, and forbid leading dots so users can't escape the folder.
+  const cleaned = raw
+    .toString()
+    .trim()
+    .replace(/[\\/]+/g, '_')
+    .replace(/[^A-Za-z0-9 ._-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^\.+/, '')
+    .slice(0, 60);
+  return cleaned;
+}
+
+/** Render the breadcrumb trail for the current path. */
+function renderBreadcrumbs() {
+  const wrap = els.breadcrumbs;
+  if (!wrap) return;
+  wrap.textContent = '';
+
+  // "Home" crumb (root of cloudvault-uploads)
+  const home = document.createElement('button');
+  home.type = 'button';
+  home.className = 'crumb';
+  home.setAttribute('aria-label', 'Go to library root');
+
+  const homeIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  homeIcon.setAttribute('viewBox', '0 0 24 24');
+  homeIcon.setAttribute('fill', 'none');
+  homeIcon.innerHTML =
+    '<path d="M3 11l9-8 9 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '<path d="M5 10v9a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1v-9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>';
+  home.appendChild(homeIcon);
+
+  const homeLabel = document.createElement('span');
+  homeLabel.textContent = 'Library';
+  home.appendChild(homeLabel);
+
+  if (state.currentPath.length === 0) {
+    home.classList.add('is-current');
+    home.disabled = true;
+  } else {
+    home.addEventListener('click', () => navigateTo([]));
+  }
+  wrap.appendChild(home);
+
+  // Each folder segment in the path
+  state.currentPath.forEach((segment, idx) => {
+    const sep = document.createElement('span');
+    sep.className = 'crumb-sep';
+    sep.setAttribute('aria-hidden', 'true');
+    sep.textContent = '›';
+    wrap.appendChild(sep);
+
+    const isLast = idx === state.currentPath.length - 1;
+    const c = document.createElement('button');
+    c.type = 'button';
+    c.className = 'crumb' + (isLast ? ' is-current' : '');
+    c.textContent = segment;
+    c.title = segment;
+    if (isLast) {
+      c.disabled = true;
+    } else {
+      c.addEventListener('click', () => navigateTo(state.currentPath.slice(0, idx + 1)));
+    }
+    wrap.appendChild(c);
+  });
+}
+
+/** Navigate to a new folder path (array of segments). */
+function navigateTo(pathSegments) {
+  state.currentPath = Array.isArray(pathSegments) ? pathSegments.slice() : [];
+  // Reset selected files so users don't accidentally upload elsewhere.
+  loadGallery();
+}
+
+/** Build a folder card (clickable to open). */
+function buildFolderCard(entry) {
+  const path = entry.path || `${currentFolderPath()}/${entry.name}`;
+
+  const card = document.createElement('article');
+  card.className = 'gallery-card folder-card';
+  card.dataset.path = path;
+  card.dataset.kind = 'folder';
+  card.setAttribute('role', 'button');
+  card.setAttribute('tabindex', '0');
+  card.setAttribute('aria-label', `Open folder ${entry.name}`);
+
+  const media = document.createElement('div');
+  media.className = 'gc-media';
+  card.appendChild(media);
+
+  const badge = document.createElement('span');
+  badge.className = 'gc-badge';
+  badge.dataset.kind = 'folder';
+  badge.textContent = 'Folder';
+  media.appendChild(badge);
+
+  const icon = document.createElement('div');
+  icon.className = 'folder-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.innerHTML =
+    '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>';
+  icon.appendChild(svg);
+  media.appendChild(icon);
+
+  const info = document.createElement('div');
+  info.className = 'gc-info';
+
+  const nm = document.createElement('div');
+  nm.className = 'gc-name';
+  nm.textContent = entry.name;
+  info.appendChild(nm);
+
+  const meta = document.createElement('div');
+  meta.className = 'gc-meta';
+  meta.textContent = 'Folder';
+  info.appendChild(meta);
+
+  const pathEl = document.createElement('div');
+  pathEl.className = 'gc-meta';
+  pathEl.textContent = path;
+  info.appendChild(pathEl);
+
+  card.appendChild(info);
+
+  const actions = document.createElement('div');
+  actions.className = 'gc-actions';
+
+  const openBtn = document.createElement('button');
+  openBtn.type = 'button';
+  openBtn.className = 'btn btn-primary';
+  openBtn.textContent = 'Open';
+  openBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    handleOpenFolder(entry);
+  });
+  actions.appendChild(openBtn);
+
+  const delBtn = document.createElement('button');
+  delBtn.type = 'button';
+  delBtn.className = 'btn btn-danger';
+  delBtn.textContent = 'Delete';
+  delBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    handleDeleteFolder(entry, card);
+  });
+  actions.appendChild(delBtn);
+
+  card.appendChild(actions);
+
+  // Whole-card click / keyboard opens the folder (except clicks on buttons).
+  card.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return;
+    handleOpenFolder(entry);
+  });
+  card.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      handleOpenFolder(entry);
+    }
+  });
+
+  return card;
+}
+
+/** Open a sub-folder. */
+function handleOpenFolder(entry) {
+  if (!entry || !entry.name) return;
+  navigateTo([...state.currentPath, entry.name]);
+}
+
+/** Create a new folder inside the current folder. */
+async function handleNewFolder() {
+  try {
+    await waitForPuter();
+  } catch (err) {
+    setStatus(readableError(err), 'error');
+    return;
+  }
+
+  const ok = await ensureSignedIn();
+  if (!ok) return;
+
+  const raw = window.prompt('Folder name', '');
+  if (raw === null) return; // user cancelled
+
+  const name = sanitizeFolderName(raw);
+  if (!name) {
+    setStatus('Please enter a valid folder name.', 'warning');
+    return;
+  }
+
+  const target = `${currentFolderPath()}/${name}`;
+  setStatus(`Creating folder ${name}…`, 'working');
+
+  try {
+    if (!window.puter?.fs?.mkdir) {
+      throw new Error('Puter mkdir is not available.');
+    }
+    await window.puter.fs.mkdir(target, {
+      createMissingParents: true,
+      overwrite: false,
+      dedupeName: true
+    });
+    setStatus(`Folder "${name}" created.`, 'success');
+    await loadGallery();
+  } catch (err) {
+    console.error('mkdir failed:', err);
+    if (isAuthError(err)) {
+      setStatus('Please sign in to Puter to upload and manage your files.', 'warning');
+    } else {
+      setStatus(`Could not create folder: ${readableError(err)}`, 'error');
+    }
+  }
+}
+
+/** Delete a sub-folder (with confirmation; recursive when supported). */
+async function handleDeleteFolder(entry, card) {
+  const path = entry.path || `${currentFolderPath()}/${entry.name}`;
+  const confirmed = window.confirm(
+    `Delete folder "${entry.name}" and everything inside it?\n\nThis cannot be undone.`
+  );
+  if (!confirmed) return;
+
+  card.querySelectorAll('button').forEach((b) => (b.disabled = true));
+  setStatus(`Deleting folder ${entry.name}…`, 'working');
+
+  try {
+    // Prefer recursive delete; some Puter.js builds use { recursive: true }.
+    await window.puter.fs.delete(path, { recursive: true });
+    setStatus('Folder deleted.', 'success');
+    await loadGallery();
+  } catch (err) {
+    console.error('folder delete failed:', err);
+    if (isAuthError(err)) {
+      setStatus('Please sign in to Puter to upload and manage your files.', 'warning');
+    } else {
+      setStatus(`Delete failed: ${readableError(err)}`, 'error');
+    }
+    card.querySelectorAll('button').forEach((b) => (b.disabled = false));
+  }
+}
+
+// ===========================================================
 // Download
 // ===========================================================
 
 async function handleDownload(entry, card) {
-  const path = entry.path || `${STORAGE_FOLDER}/${entry.name}`;
+  const path = entry.path || `${currentFolderPath()}/${entry.name}`;
   const friendly = friendlyFilename(entry.name);
   const mime = mimeFromName(entry.name) || 'application/octet-stream';
 
@@ -947,7 +1225,7 @@ async function handleDownload(entry, card) {
 // ===========================================================
 
 async function handleDelete(entry, card) {
-  const path = entry.path || `${STORAGE_FOLDER}/${entry.name}`;
+  const path = entry.path || `${currentFolderPath()}/${entry.name}`;
   const confirmed = window.confirm(`Delete this file?\n\n${entry.name}\n\nThis cannot be undone.`);
   if (!confirmed) return;
 
@@ -1044,6 +1322,13 @@ function bindEvents() {
   els.refreshBtn.addEventListener('click', () => {
     loadGallery();
   });
+
+  // New folder
+  if (els.newFolderBtn) {
+    els.newFolderBtn.addEventListener('click', () => {
+      handleNewFolder();
+    });
+  }
 
   // Sign in button
   if (els.signInBtn) {
