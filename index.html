@@ -117,8 +117,16 @@
       <section class="gallery-section" aria-labelledby="gallery-heading">
         <div class="gallery-header">
           <h3 id="gallery-heading" class="card-title">Your library</h3>
-          <button id="refresh-btn" class="btn btn-ghost btn-small" type="button">Refresh</button>
+          <div class="gallery-actions">
+            <button id="new-folder-btn" class="btn btn-ghost btn-small" type="button">
+              <span aria-hidden="true">+</span>
+              <span>New folder</span>
+            </button>
+            <button id="refresh-btn" class="btn btn-ghost btn-small" type="button">Refresh</button>
+          </div>
         </div>
+
+        <nav id="breadcrumbs" class="breadcrumbs" aria-label="Folder path"></nav>
 
         <div id="gallery" class="gallery" aria-live="polite"></div>
 

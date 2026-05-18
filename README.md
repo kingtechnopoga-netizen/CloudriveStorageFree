@@ -1,5 +1,7 @@
 # CloudVault
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+
 **Real cloud upload powered by Puter.js v2.**
 
 CloudVault is a premium, mobile-first web app that lets users upload images and videos directly to their **own Puter cloud storage** — no backend, no database, no API keys. Every upload, gallery item, and delete is a real cloud operation handled entirely in the browser via [Puter.js v2](https://js.puter.com/v2/).
