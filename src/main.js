@@ -389,7 +389,7 @@ function renderSelectedList() {
   });
 }
 
-function addSelectedFiles(fileList) {
+async function addSelectedFiles(fileList) {
   if (!fileList || fileList.length === 0) return;
 
   const files = Array.from(fileList);
@@ -401,12 +401,41 @@ function addSelectedFiles(fileList) {
     else rejected.push(f);
   }
 
-  // Avoid duplicate (name + size) pairs
+  // Avoid duplicate (name + size) pairs.
+  // IMPORTANT: We read each file into an ArrayBuffer immediately while
+  // the File handle is still valid. On some phones (especially Android),
+  // the File reference becomes unreadable after the input is reset or
+  // after a delay — causing "NotReadableError: permission problems".
   for (const f of accepted) {
     const dup = state.selected.some(
       (s) => s.name === f.name && s.size === f.size && s.lastModified === f.lastModified
     );
-    if (!dup) state.selected.push(f);
+    if (!dup) {
+      // Pre-read file bytes while handle is fresh.
+      try {
+        const buf = await f.arrayBuffer();
+        const mime = f.type || mimeFromName(f.name) || 'application/octet-stream';
+        const blob = new Blob([buf], { type: mime });
+        // Reconstruct as a File with the same metadata but backed by in-memory data.
+        let stableFile;
+        try {
+          stableFile = new File([blob], f.name, {
+            type: mime,
+            lastModified: f.lastModified || Date.now()
+          });
+        } catch (_) {
+          // Fallback for browsers that don't support File constructor.
+          stableFile = blob;
+          stableFile.name = f.name;
+          stableFile.lastModified = f.lastModified || Date.now();
+        }
+        state.selected.push(stableFile);
+      } catch (readErr) {
+        console.warn('Could not pre-read file:', f.name, readErr);
+        // Still push original — upload will attempt it anyway.
+        state.selected.push(f);
+      }
+    }
   }
 
   renderSelectedList();
